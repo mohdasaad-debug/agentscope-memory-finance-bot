@@ -222,9 +222,7 @@ pip install agentscope sqlalchemy aiosqlite yfinance
 
 ## Roadmap
 
-* Streamlit UI
-* Portfolio tracker memory
-* Technical indicators (RSI, EMA)
+* Streamlit UI/FE
 * Multi-agent finance assistant
 
 ---
