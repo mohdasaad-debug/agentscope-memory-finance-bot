@@ -1,70 +1,63 @@
 from agentscope.agent import ReActAgent, UserAgent
-from agentscope.model import OpenAIChatModel
-from agentscope.formatter import DashScopeChatFormatter
+from agentscope.model import OllamaChatModel
 from agentscope.memory import AsyncSQLAlchemyMemory
 from agentscope.message import TextBlock
-from agentscope.tool import (
-    Toolkit,
-    ToolResponse,
-    execute_python_code,
-    execute_shell_command,
-)
-from dotenv import load_dotenv
+from agentscope.tool import Toolkit, ToolResponse
+from agentscope.formatter import OllamaChatFormatter
+
 from sqlalchemy.ext.asyncio import create_async_engine
 from pathlib import Path
-import os
 import re
 import json
 import asyncio
 import yfinance as yf
 
-load_dotenv()
 
-
+# ------------------------
+# utils
+# ------------------------
 def sanitize_user_id(user_id: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_-]", "_", user_id.strip())
     return safe or "default_user"
 
 
-async def get_yahoo_finance_quote(
-    symbols: str,
-    region: str = "US",
-    lang: str = "en-US",
-) -> ToolResponse:
-    """Fetch near real-time Yahoo Finance quote data for ticker symbols
-    using the `yfinance` Python package.
+def parse_symbols(symbols: str) -> list[str]:
+    try:
+        parsed = json.loads(symbols)
+        if isinstance(parsed, list):
+            return [str(s).upper() for s in parsed]
+    except Exception:
+        pass
 
-    Args:
-        symbols (`str`):
-            Comma-separated symbols, e.g. "AAPL,MSFT,TSLA".
-        region (`str`, defaults to `"US"`):
-            Kept for compatibility. Not used by yfinance.
-        lang (`str`, defaults to `"en-US"`):
-            Kept for compatibility. Not used by yfinance.
+    cleaned = (
+        symbols.replace("[", "")
+        .replace("]", "")
+        .replace('"', "")
+        .replace("'", "")
+    )
+    return [s.strip().upper() for s in cleaned.split(",") if s.strip()]
 
-    Returns:
-        `ToolResponse`:
-            JSON payload with quote metrics per symbol.
-    """
-    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+
+# ------------------------
+# tool
+# ------------------------
+async def get_yahoo_finance_quote(symbols: str) -> ToolResponse:
+    """Fetch stock quotes using yfinance"""
+
+    symbol_list = parse_symbols(symbols)
+
     if not symbol_list:
         return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text='{"error":"No symbols provided. Example: AAPL,MSFT"}',
-                ),
-            ],
+            content=[TextBlock(type="text", text='{"error":"No symbols provided"}')]
         )
 
-    def _to_number(value: object) -> float | int | None:
-        if isinstance(value, (int, float)):
-            return value
-        return None
+    def _to_number(value):
+        return value if isinstance(value, (int, float)) else None
 
-    def _fetch_symbol_quote(symbol: str) -> dict:
+    def _fetch(symbol):
         ticker = yf.Ticker(symbol)
         info = ticker.info if isinstance(ticker.info, dict) else {}
+
         try:
             fast_info = dict(ticker.fast_info) if ticker.fast_info else {}
         except Exception:
@@ -73,35 +66,20 @@ async def get_yahoo_finance_quote(
         return {
             "symbol": symbol,
             "name": info.get("shortName") or info.get("longName"),
-            "price": _to_number(
-                fast_info.get("lastPrice"),
-            ) or _to_number(info.get("regularMarketPrice")),
+            "price": _to_number(fast_info.get("lastPrice"))
+            or _to_number(info.get("regularMarketPrice")),
             "change": _to_number(info.get("regularMarketChange")),
             "change_percent": _to_number(info.get("regularMarketChangePercent")),
-            "currency": info.get("currency") or fast_info.get("currency"),
-            "market_state": info.get("marketState"),
-            "market_time": info.get("regularMarketTime"),
-            "day_high": _to_number(
-                fast_info.get("dayHigh"),
-            ) or _to_number(info.get("regularMarketDayHigh")),
-            "day_low": _to_number(
-                fast_info.get("dayLow"),
-            ) or _to_number(info.get("regularMarketDayLow")),
-            "volume": _to_number(
-                fast_info.get("lastVolume"),
-            ) or _to_number(info.get("regularMarketVolume")),
-            "market_cap": _to_number(
-                fast_info.get("marketCap"),
-            ) or _to_number(info.get("marketCap")),
-            "exchange": info.get("fullExchangeName")
-            or info.get("exchange")
-            or fast_info.get("exchange"),
+            "currency": info.get("currency"),
+            "day_high": _to_number(fast_info.get("dayHigh")),
+            "day_low": _to_number(fast_info.get("dayLow")),
+            "volume": _to_number(fast_info.get("lastVolume")),
         }
 
     try:
         quotes = []
         for symbol in symbol_list:
-            quote = await asyncio.to_thread(_fetch_symbol_quote, symbol)
+            quote = await asyncio.to_thread(_fetch, symbol)
             quotes.append(quote)
 
         return ToolResponse(
@@ -110,45 +88,30 @@ async def get_yahoo_finance_quote(
                     type="text",
                     text=json.dumps(
                         {
-                            "requested_symbols": symbol_list,
-                            "count": len(quotes),
                             "quotes": quotes,
-                            "note": (
-                                "Data fetched via yfinance. Quotes may be "
-                                "delayed depending on exchange."
-                            ),
-                            "region": region,
-                            "lang": lang,
+                            "count": len(quotes),
+                            "note": "Data via yfinance (may be delayed)",
                         },
                         indent=2,
                     ),
-                ),
-            ],
+                )
+            ]
         )
-    except Exception as exc:
+    except Exception as e:
         return ToolResponse(
             content=[
                 TextBlock(
                     type="text",
-                    text=json.dumps(
-                        {
-                            "error": "Failed to fetch Yahoo Finance data.",
-                            "details": str(exc),
-                            "requested_symbols": symbol_list,
-                        },
-                        indent=2,
-                    ),
-                ),
-            ],
+                    text=json.dumps({"error": str(e)}, indent=2),
+                )
+            ]
         )
 
-
-async def main():
-    user_id = (
-        input("Enter user id (for persistent memory): ").strip()
-        or "default_user"
-    )
-    session_id = "default_session"
+# ------------------------
+# agent factory (FOR UI)
+# ------------------------
+async def create_agent(user_id: str):
+    session_id = "streamlit_session"
 
     memory_dir = Path("memories")
     memory_dir.mkdir(parents=True, exist_ok=True)
@@ -162,20 +125,76 @@ async def main():
     )
 
     toolkit = Toolkit()
-    toolkit.register_tool_function(execute_python_code)
-    toolkit.register_tool_function(execute_shell_command)
     toolkit.register_tool_function(get_yahoo_finance_quote)
+
+    model = OllamaChatModel(
+        model_name="llama3.2:3b",
+        host="http://localhost:11434",
+        stream=True,
+    )
 
     agent = ReActAgent(
         name="Friday",
-        sys_prompt="You're a helpful assistant named Friday.",
-        model=OpenAIChatModel(
-            model_name="gpt-4o",
-            api_key=os.getenv("OPENAI_API_KEY"),
-            stream=True,
-        ),
+        sys_prompt="""
+You are Friday, a helpful assistant.
+
+Rules:
+- Be concise
+- Use tools when needed
+- Tool arguments MUST be valid JSON objects
+""",
+        model=model,
         memory=memory,
-        formatter=DashScopeChatFormatter(),
+        formatter=OllamaChatFormatter(),
+        toolkit=toolkit,
+    )
+
+    return agent, memory, engine
+
+# ------------------------
+# main
+# ------------------------
+async def main():
+    user_id = input("Enter user id: ").strip() or "default_user"
+    session_id = "default_session"
+
+    # memory
+    memory_dir = Path("memories")
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    db_path = memory_dir / f"{sanitize_user_id(user_id)}.db"
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    memory = AsyncSQLAlchemyMemory(
+        engine_or_session=engine,
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    # toolkit
+    toolkit = Toolkit()
+    toolkit.register_tool_function(get_yahoo_finance_quote)
+
+    # ✅ LOCAL MODEL (Ollama)
+    model = OllamaChatModel(
+        model_name="llama3.2:3b",  # 🔥 best for your machine
+        host="http://localhost:11434",
+        stream=True,
+    )
+
+    # agent
+    agent = ReActAgent(
+        name="Friday",
+        sys_prompt="""
+You are Friday, a helpful assistant.
+
+Rules:
+- Be concise
+- Use tools when needed
+- Tool arguments MUST be valid JSON objects
+""",
+        model=model,
+        memory=memory,
+        formatter=OllamaChatFormatter(),
         toolkit=toolkit,
     )
 
@@ -186,11 +205,13 @@ async def main():
         while True:
             msg = await agent(msg)
             msg = await user(msg)
-            if msg.get_text_content() == "exit":
+
+            if msg.get_text_content().strip().lower() == "exit":
                 break
     finally:
         await memory.close()
         await engine.dispose()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

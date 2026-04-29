@@ -1,0 +1,7 @@
+agentscope
+streamlit
+sqlalchemy
+aiosqlite
+yfinance
+ollama
+python-dotenv
